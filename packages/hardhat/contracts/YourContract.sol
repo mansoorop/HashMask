@@ -1,87 +1,118 @@
-//SPDX-License-Identifier: MIT
-pragma solidity >=0.8.0 <0.9.0;
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.19;
 
-// Useful for debugging. Remove when deploying to a live network.
-import "hardhat/console.sol";
-
-// Use openzeppelin to inherit battle-tested implementations (ERC20, ERC721, etc)
-// import "@openzeppelin/contracts/access/Ownable.sol";
+import {FunctionsClient} from "@chainlink/contracts/src/v0.8/functions/dev/v1_0_0/FunctionsClient.sol";
+import {ConfirmedOwner} from "@chainlink/contracts/src/v0.8/shared/access/ConfirmedOwner.sol";
+import {FunctionsRequest} from "@chainlink/contracts/src/v0.8/functions/dev/v1_0_0/libraries/FunctionsRequest.sol";
 
 /**
- * A smart contract that allows changing a state variable of the contract and tracking the changes
- * It also allows the owner to withdraw the Ether in the contract
- * @author BuidlGuidl
+ * Request testnet LINK and ETH here: https://faucets.chain.link/
+ * Find information on LINK Token Contracts and get the latest ETH and LINK faucets here: https://docs.chain.link/resources/link-token-contracts/
  */
-contract YourContract {
-	// State Variables
-	address public immutable owner;
-	string public greeting = "Building Unstoppable Apps!!!";
-	bool public premium = false;
-	uint256 public totalCounter = 0;
-	mapping(address => uint) public userGreetingCounter;
 
-	// Events: a way to emit log statements from smart contract that can be listened to by external parties
-	event GreetingChange(
-		address indexed greetingSetter,
-		string newGreeting,
-		bool premium,
-		uint256 value
-	);
+/**
+ * @title GettingStartedFunctionsConsumer
+ * @notice This is an example contract to show how to make HTTP requests using Chainlink
+ * @dev This contract uses hardcoded values and should not be used in production.
+ */
+contract GettingStartedFunctionsConsumer is FunctionsClient, ConfirmedOwner {
+    using FunctionsRequest for FunctionsRequest.Request;
 
-	// Constructor: Called once on contract deployment
-	// Check packages/hardhat/deploy/00_deploy_your_contract.ts
-	constructor(address _owner) {
-		owner = _owner;
-	}
+    // State variables to store the last request ID, response, and error
+    bytes32 public s_lastRequestId;
+    bytes public s_lastResponse;
+    bytes public s_lastError;
 
-	// Modifier: used to define a set of rules that must be met before or after a function is executed
-	// Check the withdraw() function
-	modifier isOwner() {
-		// msg.sender: predefined variable that represents address of the account that called the current function
-		require(msg.sender == owner, "Not the Owner");
-		_;
-	}
+    // Custom error type
+    error UnexpectedRequestID(bytes32 requestId);
 
-	/**
-	 * Function that allows anyone to change the state variable "greeting" of the contract and increase the counters
-	 *
-	 * @param _newGreeting (string memory) - new greeting to save on the contract
-	 */
-	function setGreeting(string memory _newGreeting) public payable {
-		// Print data to the hardhat chain console. Remove when deploying to a live network.
-		console.log(
-			"Setting new greeting '%s' from %s",
-			_newGreeting,
-			msg.sender
-		);
+    // Event to log responses
+    event Response(
+        bytes32 indexed requestId,
+        string character,
+        bytes response,
+        bytes err
+    );
 
-		// Change state variables
-		greeting = _newGreeting;
-		totalCounter += 1;
-		userGreetingCounter[msg.sender] += 1;
+    // Router address - Hardcoded for Mumbai
+    // Check to get the router address for your supported network https://docs.chain.link/chainlink-functions/supported-networks
+    address router = 0x6E2dc0F9DB014aE19888F539E59285D2Ea04244C;
 
-		// msg.value: built-in global variable that represents the amount of ether sent with the transaction
-		if (msg.value > 0) {
-			premium = true;
-		} else {
-			premium = false;
-		}
+    // JavaScript source code
+    // Fetch character name from the Star Wars API.
+    // Documentation: https://swapi.dev/documentation#people
+    string source =
+        "const characterId = args[0];"
+        "const apiResponse = await Functions.makeHttpRequest({"
+        "url: `https://swapi.dev/api/people/${characterId}/`"
+        "});"
+        "if (apiResponse.error) {"
+        "throw Error('Request failed');"
+        "}"
+        "const { data } = apiResponse;"
+        "return Functions.encodeString(data.name);";
 
-		// emit: keyword used to trigger an event
-		emit GreetingChange(msg.sender, _newGreeting, msg.value > 0, 0);
-	}
+    //Callback gas limit
+    uint32 gasLimit = 300000;
 
-	/**
-	 * Function that allows the owner to withdraw all the Ether in the contract
-	 * The function can only be called by the owner of the contract as defined by the isOwner modifier
-	 */
-	function withdraw() public isOwner {
-		(bool success, ) = owner.call{ value: address(this).balance }("");
-		require(success, "Failed to send Ether");
-	}
+    // donID - Hardcoded for Mumbai
+    // Check to get the donID for your supported network https://docs.chain.link/chainlink-functions/supported-networks
+    bytes32 donID =
+        0x66756e2d706f6c79676f6e2d6d756d6261692d31000000000000000000000000;
 
-	/**
-	 * Function that allows the contract to receive ETH
-	 */
-	receive() external payable {}
+    // State variable to store the returned character information
+    string public character;
+
+    /**
+     * @notice Initializes the contract with the Chainlink router address and sets the contract owner
+     */
+    constructor() FunctionsClient(router) ConfirmedOwner(msg.sender) {}
+
+    /**
+     * @notice Sends an HTTP request for character information
+     * @param subscriptionId The ID for the Chainlink subscription
+     * @param args The arguments to pass to the HTTP request
+     * @return requestId The ID of the request
+     */
+    function sendRequest(
+        uint64 subscriptionId,
+        string[] calldata args
+    ) external onlyOwner returns (bytes32 requestId) {
+        FunctionsRequest.Request memory req;
+        req.initializeRequestForInlineJavaScript(source); // Initialize the request with JS code
+        if (args.length > 0) req.setArgs(args); // Set the arguments for the request
+
+        // Send the request and store the request ID
+        s_lastRequestId = _sendRequest(
+            req.encodeCBOR(),
+            subscriptionId,
+            gasLimit,
+            donID
+        );
+
+        return s_lastRequestId;
+    }
+
+    /**
+     * @notice Callback function for fulfilling a request
+     * @param requestId The ID of the request to fulfill
+     * @param response The HTTP response data
+     * @param err Any errors from the Functions request
+     */
+    function fulfillRequest(
+        bytes32 requestId,
+        bytes memory response,
+        bytes memory err
+    ) internal override {
+        if (s_lastRequestId != requestId) {
+            revert UnexpectedRequestID(requestId); // Check if request IDs match
+        }
+        // Update the contract's state variables with the response and any errors
+        s_lastResponse = response;
+        character = string(response);
+        s_lastError = err;
+
+        // Emit an event to log the response
+        emit Response(requestId, character, s_lastResponse, s_lastError);
+    }
 }
